@@ -72,8 +72,8 @@ class PixelCNNModel(nn.Module):
     def __init__(
         self,
         n_levels: int = N_LEVELS,
-        n_filters: int = 64,
-        n_layers: int = 4,
+        n_filters: int = 16,
+        n_layers: int = 2,
     ) -> None:
         super().__init__()
         layers: list[nn.Module] = [

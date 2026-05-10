@@ -9,6 +9,10 @@ Pseudo-count intrinsic exploration bonuses for tabular Q-learning, based on [Bel
 ```bash
 python -m venv .venv
 ```
+or
+```bash
+python3 -m venv .venv
+```
 
 Activate it:
 
@@ -17,19 +21,9 @@ Activate it:
 
 ### 2. Install packages
 
-**Tabular only (`main.py`):**
-
 ```bash
-pip install gymnasium[toy-text] numpy matplotlib
+pip install torch numpy matplotlib "gymnasium[atari]" "gymnasium[other]" ale-py autorom --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.org/simple
 ```
-
-**Atari (`atari_dqn.py`) — install everything:**
-
-```bash
-pip install torch numpy matplotlib gymnasium[atari] ale-py autorom
-```
-
-> For GPU support, replace the `torch` line with the build matching your CUDA version from [pytorch.org](https://pytorch.org/get-started/locally/).
 
 ### 3. Download Atari ROMs
 
@@ -42,8 +36,7 @@ python -c "from AutoROM.AutoROM import cli; from click.testing import CliRunner;
 ## Run
 
 ```bash
-python main.py                                     # FrozenLake, Taxi, CliffWalking
-python atari_dqn.py                                # Pong, 2 M steps
+python atari_dqn.py
 python atari_dqn.py --env ALE/Breakout-v5 --steps 5000000
 ```
 
