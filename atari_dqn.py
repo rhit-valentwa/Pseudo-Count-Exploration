@@ -207,6 +207,7 @@ def train(
     epsilon_end: float = 0.05,
     epsilon_decay_steps: int = 1_000_000,
     beta: float = 0.05,
+    density_model: str = "pixelcnn",
     n_frames: int = 4,
     log_freq: int = 10_000,
     graphs_dir: str = "graphs",
@@ -247,8 +248,13 @@ def train(
             print(f"torch.compile disabled: {e}")
             online_net, target_net = online_raw, target_raw
 
-    buffer   = LazyStackReplay(buffer_capacity, (H, W), n_frames, device)
-    bonus_fn = make_pixelcnn_bonus((n_frames, H, W), beta=beta)
+    buffer = LazyStackReplay(buffer_capacity, (H, W), n_frames, device)
+    if density_model == "cts":
+        from cts import make_cts_bonus
+        bonus_fn = make_cts_bonus((n_frames, H, W), beta=beta)
+    else:
+        bonus_fn = make_pixelcnn_bonus((n_frames, H, W), beta=beta)
+    print(f"Density model: {density_model}")
 
     # Reusable host-side scratch buffers (no per-step allocation in the hot loop)
     pin       = device.type == "cuda"
@@ -399,6 +405,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--beta",  type=float, default=0.10)
     parser.add_argument("--seed",  type=int, default=0)
+    parser.add_argument("--density", choices=["pixelcnn", "cts"], default="pixelcnn")
     parser.add_argument("--no-compile", action="store_true",
                         help="Disable torch.compile (use it if you hit a compile-time error).")
     args = parser.parse_args()
@@ -408,5 +415,6 @@ if __name__ == "__main__":
         total_steps=args.steps,
         beta=args.beta,
         seed=args.seed,
+        density_model=args.density,
         use_compile=not args.no_compile,
     )
