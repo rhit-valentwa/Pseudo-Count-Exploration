@@ -81,14 +81,6 @@ class TrainConfig:
     density: str = "cts"  # choices: cts, pixelcnn, none
     beta: float = 0.05
 
-    # Optional temporal intrinsic reward.
-    use_temporal: bool = False
-    temporal_beta: float = 0.01
-    temporal_lr: float = 1e-4
-    temporal_train_every: int = 1
-    temporal_loss_type: str = "bce"
-    temporal_no_normalize: bool = False
-
     n_frames: int = 4
     log_freq: int = 1_000
     graphs_dir: str = "graphs"
@@ -358,30 +350,15 @@ def make_state_bonus_fn(density: str, beta: float, n_frames: int, h: int, w: int
         from modules.cts import make_cts_bonus
         return make_cts_bonus((h, w), beta=beta)
 
+    if density == "vae":
+        from modules.vae import make_vae_bonus
+        return make_vae_bonus((n_frames, h, w), beta=beta)
+
     if density == "pixelcnn":
         from modules.pixel_cnn import make_pixelcnn_bonus
         return make_pixelcnn_bonus((n_frames, h, w), beta=beta)
 
     raise ValueError(f"Unknown density model: {density}")
-
-
-def make_temporal_bonus_fn(config: TrainConfig, n_actions: int, device: torch.device):
-    if not config.use_temporal:
-        return None
-
-    from modules.temporal_bonus import make_temporal_bonus
-
-    return make_temporal_bonus(
-        n_actions=n_actions,
-        n_frames=config.n_frames,
-        beta=config.temporal_beta,
-        lr=config.temporal_lr,
-        device=device,
-        train_every=config.temporal_train_every,
-        loss_type=config.temporal_loss_type,
-        normalize_bonus=not config.temporal_no_normalize,
-    )
-
 
 # =============================================================================
 # Logging utilities
@@ -395,8 +372,6 @@ def make_run_dir(config: TrainConfig) -> str:
         run_name = config.run_name
     else:
         parts = [timestamp, safe_env, config.density]
-        if config.use_temporal:
-            parts.append("temporal")
         parts.append(f"seed{config.seed}")
         run_name = "_".join(parts)
 
@@ -418,11 +393,9 @@ def init_progress_csv(run_dir: str) -> str:
         "avg_ext_20ep",
         "avg_intr_20ep",
         "avg_state_intr_20ep",
-        "avg_temporal_intr_20ep",
         "current_ep_ext",
         "current_ep_intr",
         "current_ep_state_intr",
-        "current_ep_temporal_intr",
         "replay_size",
     ]
 
@@ -471,7 +444,6 @@ def train(config: TrainConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}", flush=True)
     print(f"Density model: {config.density}", flush=True)
-    print(f"Temporal bonus: {config.use_temporal}", flush=True)
     print(f"Sticky action probability: {config.sticky_action_prob}", flush=True)
     print("Monte Carlo return mixing: disabled", flush=True)
 
@@ -524,14 +496,6 @@ def train(config: TrainConfig) -> None:
         h=h,
         w=w,
     )
-    temporal_bonus_fn = make_temporal_bonus_fn(config, n_actions=n_actions, device=device)
-
-    if temporal_bonus_fn is not None:
-        print(
-            f"Temporal bonus enabled: beta={config.temporal_beta}, "
-            f"lr={config.temporal_lr}, train_every={config.temporal_train_every}",
-            flush=True,
-        )
 
     pin = device.type == "cuda"
     obs_pin = torch.empty(
@@ -558,12 +522,10 @@ def train(config: TrainConfig) -> None:
     ep_returns: List[float] = []
     ep_intrinsic: List[float] = []
     ep_state_intrinsic: List[float] = []
-    ep_temporal_intrinsic: List[float] = []
 
     ep_return = 0.0
     ep_intr = 0.0
     ep_state_intr = 0.0
-    ep_temporal_intr = 0.0
 
     first_frame, _ = env.reset(seed=config.seed)
     reset_deque(first_frame)
@@ -571,10 +533,6 @@ def train(config: TrainConfig) -> None:
     for step in range(1, config.total_steps + 1):
         frac = min(1.0, step / config.epsilon_decay_steps)
         epsilon = config.epsilon_start + frac * (config.epsilon_end - config.epsilon_start)
-
-        # Always build the current stack; it is used by action selection and by temporal bonus.
-        fill_stack(stack_u8)
-        current_stack_for_temporal = stack_u8.copy() if config.use_temporal else None
 
         if random.random() < epsilon:
             action = int(env.action_space.sample())
@@ -596,29 +554,23 @@ def train(config: TrainConfig) -> None:
             if config.density == "cts":
                 # Pseudo-count paper CTS: density over current single frame.
                 state_bonus, _ = state_bonus_fn.bonus_and_update(next_frame)
-            elif config.density == "pixelcnn":
-                # PixelCNN option: density over post-step stack.
+            elif config.density == "vae":
                 for i in range(config.n_frames - 1):
                     stack_u8[i] = frame_deque[i + 1]
                 stack_u8[-1] = next_frame
                 stack_float[:] = stack_u8
                 stack_float *= inv255
                 state_bonus, _ = state_bonus_fn.bonus_and_update(stack_float)
-
-        # ------------------------------------------------------------------
-        # Temporal intrinsic bonus: forward-prediction error
-        # ------------------------------------------------------------------
-        temporal_bonus = 0.0
-        if temporal_bonus_fn is not None:
-            if current_stack_for_temporal is None:
-                raise RuntimeError("Temporal bonus enabled but current stack was not saved.")
-            temporal_bonus, _ = temporal_bonus_fn.bonus_and_update(
-                current_stack_for_temporal,
-                action,
-                next_frame,
-            )
-
-        intr_bonus = float(state_bonus) + float(temporal_bonus)
+            elif config.density in ("pixelcnn", "vae"):
+                # PixelCNN and VAE use the post-step 4-frame stack.
+                for i in range(config.n_frames - 1):
+                    stack_u8[i] = frame_deque[i + 1]
+                stack_u8[-1] = next_frame
+                stack_float[:] = stack_u8
+                stack_float *= inv255
+                state_bonus, _ = state_bonus_fn.bonus_and_update(stack_float)
+                
+        intr_bonus = float(state_bonus)
         total_reward = float(extrinsic) + intr_bonus
         if config.clip_combined_reward:
             total_reward = float(np.clip(total_reward, -1.0, 1.0))
@@ -628,18 +580,15 @@ def train(config: TrainConfig) -> None:
         ep_return += float(extrinsic)
         ep_intr += intr_bonus
         ep_state_intr += float(state_bonus)
-        ep_temporal_intr += float(temporal_bonus)
 
         if done:
             ep_returns.append(ep_return)
             ep_intrinsic.append(ep_intr)
             ep_state_intrinsic.append(ep_state_intr)
-            ep_temporal_intrinsic.append(ep_temporal_intr)
 
             ep_return = 0.0
             ep_intr = 0.0
             ep_state_intr = 0.0
-            ep_temporal_intr = 0.0
 
             reset_frame, _ = env.reset()
             reset_deque(reset_frame)
@@ -681,7 +630,6 @@ def train(config: TrainConfig) -> None:
             avg_ext = float(np.mean(ep_returns[-20:])) if ep_returns else 0.0
             avg_intr = float(np.mean(ep_intrinsic[-20:])) if ep_intrinsic else 0.0
             avg_state_intr = float(np.mean(ep_state_intrinsic[-20:])) if ep_state_intrinsic else 0.0
-            avg_temporal_intr = float(np.mean(ep_temporal_intrinsic[-20:])) if ep_temporal_intrinsic else 0.0
 
             row = {
                 "step": step,
@@ -690,11 +638,9 @@ def train(config: TrainConfig) -> None:
                 "avg_ext_20ep": avg_ext,
                 "avg_intr_20ep": avg_intr,
                 "avg_state_intr_20ep": avg_state_intr,
-                "avg_temporal_intr_20ep": avg_temporal_intr,
                 "current_ep_ext": ep_return,
                 "current_ep_intr": ep_intr,
                 "current_ep_state_intr": ep_state_intr,
-                "current_ep_temporal_intr": ep_temporal_intr,
                 "replay_size": len(replay),
             }
             append_progress_csv(progress_csv, row)
@@ -705,8 +651,7 @@ def train(config: TrainConfig) -> None:
                 f"episodes={len(ep_returns):>5}  "
                 f"avg_ext_20ep={avg_ext:>8.2f}  "
                 f"avg_intr_20ep={avg_intr:.4f}  "
-                f"state_intr={avg_state_intr:.4f}  "
-                f"temp_intr={avg_temporal_intr:.4f}",
+                f"state_intr={avg_state_intr:.4f}  ",
                 flush=True,
             )
 
@@ -720,7 +665,6 @@ def train(config: TrainConfig) -> None:
         extrinsic_returns=np.asarray(ep_returns, dtype=np.float32),
         intrinsic_returns=np.asarray(ep_intrinsic, dtype=np.float32),
         state_intrinsic_returns=np.asarray(ep_state_intrinsic, dtype=np.float32),
-        temporal_intrinsic_returns=np.asarray(ep_temporal_intrinsic, dtype=np.float32),
     )
 
     print(f"Saved final checkpoint: {final_ckpt_path}", flush=True)
@@ -794,7 +738,7 @@ def plot_training_curves(
 
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(
-        description="Double DQN + pseudo-count exploration, with optional temporal bonus"
+        description="Double DQN + pseudo-count exploration"
     )
 
     parser.add_argument("--env", default=TrainConfig.env_id)
@@ -811,15 +755,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--epsilon-end", type=float, default=TrainConfig.epsilon_end)
     parser.add_argument("--epsilon-decay-steps", type=int, default=TrainConfig.epsilon_decay_steps)
 
-    parser.add_argument("--density", choices=["cts", "pixelcnn", "none"], default=TrainConfig.density)
+    parser.add_argument("--density", choices=["cts", "pixelcnn", "vae", "none"], default=TrainConfig.density)
     parser.add_argument("--beta", type=float, default=TrainConfig.beta)
-
-    parser.add_argument("--use-temporal", action="store_true")
-    parser.add_argument("--temporal-beta", type=float, default=TrainConfig.temporal_beta)
-    parser.add_argument("--temporal-lr", type=float, default=TrainConfig.temporal_lr)
-    parser.add_argument("--temporal-train-every", type=int, default=TrainConfig.temporal_train_every)
-    parser.add_argument("--temporal-loss-type", choices=["bce", "mse"], default=TrainConfig.temporal_loss_type)
-    parser.add_argument("--temporal-no-normalize", action="store_true")
 
     parser.add_argument("--n-frames", type=int, default=TrainConfig.n_frames)
     parser.add_argument("--log-freq", type=int, default=TrainConfig.log_freq)
@@ -851,12 +788,6 @@ def parse_args() -> TrainConfig:
         epsilon_decay_steps=args.epsilon_decay_steps,
         density=args.density,
         beta=args.beta,
-        use_temporal=args.use_temporal,
-        temporal_beta=args.temporal_beta,
-        temporal_lr=args.temporal_lr,
-        temporal_train_every=args.temporal_train_every,
-        temporal_loss_type=args.temporal_loss_type,
-        temporal_no_normalize=args.temporal_no_normalize,
         n_frames=args.n_frames,
         log_freq=args.log_freq,
         graphs_dir=args.graphs_dir,
@@ -868,7 +799,6 @@ def parse_args() -> TrainConfig:
         sticky_action_prob=args.sticky_action_prob,
         clip_combined_reward=args.clip_combined_reward,
     )
-
 
 if __name__ == "__main__":
     train(parse_args())
