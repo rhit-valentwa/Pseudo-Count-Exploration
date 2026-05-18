@@ -710,10 +710,6 @@ def train(config: TrainConfig) -> None:
                 flush=True,
             )
 
-        if config.checkpoint_freq > 0 and step % config.checkpoint_freq == 0:
-            ckpt_path = os.path.join(run_dir, f"checkpoint_step_{step}.pt")
-            save_checkpoint(ckpt_path, step, online_raw, target_raw, optimizer, config)
-            print(f"Saved checkpoint: {ckpt_path}", flush=True)
 
     final_ckpt_path = os.path.join(run_dir, "checkpoint_final.pt")
     save_checkpoint(final_ckpt_path, config.total_steps, online_raw, target_raw, optimizer, config)
