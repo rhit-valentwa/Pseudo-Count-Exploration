@@ -67,3 +67,36 @@ The script falls back to CPU automatically (`Device: cpu`). Check your build:
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 If `False`, reinstall PyTorch with the correct CUDA version from [pytorch.org](https://pytorch.org/get-started/locally/).
+
+pip install cython
+python setup.py build_ext --inplace
+
+
+# Baseline run
+python atari_dqn.py \
+  --env ALE/Freeway-v5 \
+  --density cts \
+  --beta 0.05 \
+  --sticky-action-prob 0.25 \
+  --no-compile \
+  --log-freq 1000 \
+  --checkpoint-freq 50000 \
+  --log-dir logs \
+  --run-name freeway_cts_seed0 \
+  --steps 500000
+
+# n-step run
+python atari_dqn.py \
+  --env ALE/Freeway-v5 \
+  --density cts \
+  --beta 0.05 \
+  --n-step 5 \
+  --train-start 1000 \
+  --epsilon-decay-steps 100000 \
+  --epsilon-end 0.01 \
+  --target-update-freq 5000 \
+  --sticky-action-prob 0.25 \
+  --no-compile \
+  --log-freq 1000 \
+  --run-name freeway_cts_nstep5_fast_eps \
+  --steps 500000
