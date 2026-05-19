@@ -347,12 +347,14 @@ def make_state_bonus_fn(density: str, beta: float, n_frames: int, h: int, w: int
         return None
 
     if density == "cts":
-        from modules.cts import make_cts_bonus
-        return make_cts_bonus((h, w), beta=beta)
+        # Use PixelCNN prediction-gain as a drop-in replacement for CTS.
+        # PixelCNN operates on the stacked post-step observation (C, H, W).
+        from modules.pixel_cnn import make_pixelcnn_bonus
+        return make_pixelcnn_bonus((n_frames, h, w), beta=beta)
 
     if density == "vae":
-        from modules.vae import make_vae_bonus
-        return make_vae_bonus((n_frames, h, w), beta=beta)
+        from modules.vae import make_vae_pg_bonus
+        return make_vae_pg_bonus((n_frames, h, w), beta=beta)
 
     if density == "pixelcnn":
         from modules.pixel_cnn import make_pixelcnn_bonus
@@ -393,9 +395,15 @@ def init_progress_csv(run_dir: str) -> str:
         "avg_ext_20ep",
         "avg_intr_20ep",
         "avg_state_intr_20ep",
+        "avg_vae_loss_20ep",
+        "avg_vae_recon_20ep",
+        "avg_vae_kl_20ep",
         "current_ep_ext",
         "current_ep_intr",
         "current_ep_state_intr",
+        "current_ep_vae_loss",
+        "current_ep_vae_recon",
+        "current_ep_vae_kl",
         "replay_size",
     ]
 
@@ -522,10 +530,16 @@ def train(config: TrainConfig) -> None:
     ep_returns: List[float] = []
     ep_intrinsic: List[float] = []
     ep_state_intrinsic: List[float] = []
+    ep_vae_losses: List[float] = []
+    ep_vae_recons: List[float] = []
+    ep_vae_kls: List[float] = []
 
     ep_return = 0.0
     ep_intr = 0.0
     ep_state_intr = 0.0
+    ep_vae_loss = float("nan")
+    ep_vae_recon = float("nan")
+    ep_vae_kl = float("nan")
 
     first_frame, _ = env.reset(seed=config.seed)
     reset_deque(first_frame)
@@ -548,19 +562,33 @@ def train(config: TrainConfig) -> None:
 
         # ------------------------------------------------------------------
         # State-density intrinsic bonus: CTS / PixelCNN / none
+        # Capture VAE loss (if provided in info) for diagnostics.
         # ------------------------------------------------------------------
         state_bonus = 0.0
+        vae_loss_info = float("nan")
+        vae_recon_info = float("nan")
+        vae_kl_info = float("nan")
         if state_bonus_fn is not None:
             if config.density == "cts":
                 # Pseudo-count paper CTS: density over current single frame.
-                state_bonus, _ = state_bonus_fn.bonus_and_update(next_frame)
+                bonus, info = state_bonus_fn.bonus_and_update(next_frame)
+                state_bonus = bonus
+                if isinstance(info, dict):
+                    vae_loss_info = float(info.get("vae_loss", float("nan")))
+                    vae_recon_info = float(info.get("vae_recon_error", float("nan")))
+                    vae_kl_info = float(info.get("vae_kl", float("nan")))
             elif config.density == "vae":
                 for i in range(config.n_frames - 1):
                     stack_u8[i] = frame_deque[i + 1]
                 stack_u8[-1] = next_frame
                 stack_float[:] = stack_u8
                 stack_float *= inv255
-                state_bonus, _ = state_bonus_fn.bonus_and_update(stack_float)
+                bonus, info = state_bonus_fn.bonus_and_update(stack_float)
+                state_bonus = bonus
+                if isinstance(info, dict):
+                    vae_loss_info = float(info.get("vae_loss", float("nan")))
+                    vae_recon_info = float(info.get("vae_recon_error", float("nan")))
+                    vae_kl_info = float(info.get("vae_kl", float("nan")))
             elif config.density in ("pixelcnn", "vae"):
                 # PixelCNN and VAE use the post-step 4-frame stack.
                 for i in range(config.n_frames - 1):
@@ -568,8 +596,12 @@ def train(config: TrainConfig) -> None:
                 stack_u8[-1] = next_frame
                 stack_float[:] = stack_u8
                 stack_float *= inv255
-                state_bonus, _ = state_bonus_fn.bonus_and_update(stack_float)
-                
+                bonus, info = state_bonus_fn.bonus_and_update(stack_float)
+                state_bonus = bonus
+                if isinstance(info, dict):
+                    vae_loss_info = float(info.get("vae_loss", float("nan")))
+                    vae_recon_info = float(info.get("vae_recon_error", float("nan")))
+                    vae_kl_info = float(info.get("vae_kl", float("nan")))
         intr_bonus = float(state_bonus)
         total_reward = float(extrinsic) + intr_bonus
         if config.clip_combined_reward:
@@ -580,11 +612,20 @@ def train(config: TrainConfig) -> None:
         ep_return += float(extrinsic)
         ep_intr += intr_bonus
         ep_state_intr += float(state_bonus)
+        if not np.isnan(vae_loss_info):
+            ep_vae_loss = float(vae_loss_info)
+        if not np.isnan(vae_recon_info):
+            ep_vae_recon = float(vae_recon_info)
+        if not np.isnan(vae_kl_info):
+            ep_vae_kl = float(vae_kl_info)
 
         if done:
             ep_returns.append(ep_return)
             ep_intrinsic.append(ep_intr)
             ep_state_intrinsic.append(ep_state_intr)
+            ep_vae_losses.append(ep_vae_loss)
+            ep_vae_recons.append(ep_vae_recon)
+            ep_vae_kls.append(ep_vae_kl)
 
             ep_return = 0.0
             ep_intr = 0.0
@@ -630,6 +671,9 @@ def train(config: TrainConfig) -> None:
             avg_ext = float(np.mean(ep_returns[-20:])) if ep_returns else 0.0
             avg_intr = float(np.mean(ep_intrinsic[-20:])) if ep_intrinsic else 0.0
             avg_state_intr = float(np.mean(ep_state_intrinsic[-20:])) if ep_state_intrinsic else 0.0
+            avg_vae = float(np.mean(ep_vae_losses[-20:])) if ep_vae_losses else float("nan")
+            avg_vae_recon = float(np.mean(ep_vae_recons[-20:])) if ep_vae_recons else float("nan")
+            avg_vae_kl = float(np.mean(ep_vae_kls[-20:])) if ep_vae_kls else float("nan")
 
             row = {
                 "step": step,
@@ -638,9 +682,15 @@ def train(config: TrainConfig) -> None:
                 "avg_ext_20ep": avg_ext,
                 "avg_intr_20ep": avg_intr,
                 "avg_state_intr_20ep": avg_state_intr,
+                "avg_vae_loss_20ep": avg_vae,
+                "avg_vae_recon_20ep": avg_vae_recon,
+                "avg_vae_kl_20ep": avg_vae_kl,
                 "current_ep_ext": ep_return,
                 "current_ep_intr": ep_intr,
                 "current_ep_state_intr": ep_state_intr,
+                "current_ep_vae_loss": ep_vae_loss,
+                "current_ep_vae_recon": ep_vae_recon,
+                "current_ep_vae_kl": ep_vae_kl,
                 "replay_size": len(replay),
             }
             append_progress_csv(progress_csv, row)
@@ -651,7 +701,10 @@ def train(config: TrainConfig) -> None:
                 f"episodes={len(ep_returns):>5}  "
                 f"avg_ext_20ep={avg_ext:>8.2f}  "
                 f"avg_intr_20ep={avg_intr:.4f}  "
-                f"state_intr={avg_state_intr:.4f}  ",
+                f"state_intr={avg_state_intr:.4f}  "
+                f"vae_loss_20ep={avg_vae:.4f}  "
+                f"vae_recon_20ep={avg_vae_recon:.6f}  "
+                f"vae_kl_20ep={avg_vae_kl:.6f}  ",
                 flush=True,
             )
 

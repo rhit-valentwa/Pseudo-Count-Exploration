@@ -1,0 +1,1 @@
+step,epsilon,episodes,avg_ext_20ep,avg_intr_20ep,avg_state_intr_20ep,avg_vae_loss_20ep,avg_vae_recon_20ep,avg_vae_kl_20ep,current_ep_ext,current_ep_intr,current_ep_state_intr,current_ep_vae_loss,current_ep_vae_recon,current_ep_vae_kl,replay_size

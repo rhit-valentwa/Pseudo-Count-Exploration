@@ -1,0 +1,6 @@
+torch
+numpy
+gymnasium
+ale-py
+matplotlib
+cython
