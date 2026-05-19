@@ -111,18 +111,20 @@ class PixelCNNDensity:
     """
 
     def __init__(
-        self,
-        obs_shape: Tuple[int, ...],
-        n_levels: int = N_LEVELS,
-        n_filters: int = 64,
-        n_layers: int = 4,
-        lr: float = 5e-4,
-        device: str | None = None,
+    self,
+    obs_shape: Tuple[int, ...],
+    n_levels: int = N_LEVELS,
+    n_filters: int = 64,
+    n_layers: int = 4,
+    lr: float = 5e-4,
+    device: str | None = None,
     ) -> None:
         self.n_levels = n_levels
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.h, self.w = obs_shape[-2], obs_shape[-1]
         self.model = PixelCNNModel(n_levels, n_filters, n_layers).to(self.device)
+        self.base_lr = lr
+        self.step_count = 0
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
     def _prepare(self, obs: Any) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -144,10 +146,23 @@ class PixelCNNDensity:
         """
         Return (log_prob_before, log_prob_after) for one gradient step on obs.
         The model is actually updated — call this in place of separate log_prob + update.
+
+        Uses an n^(-1/2) learning-rate schedule on the density model (Ostrovski et al. 2017)
+        so prediction-gain bonuses do not deplete too rapidly.
         """
         x_f, x_q = self._prepare(obs)
         with torch.no_grad():
             lp_before = float(self.model.log_prob(x_f, x_q).item())
+
+        # Decay the density-model LR as base_lr / sqrt(n) where n is the
+        # number of density updates so far. This is the standard fix from
+        # Ostrovski et al. 2017 for making PixelCNN-based pseudo-counts
+        # behave more like true counts (slower asymptotic depletion).
+        self.step_count += 1
+        decayed_lr = self.base_lr / (self.step_count ** 0.5)
+        for g in self.optimizer.param_groups:
+            g["lr"] = decayed_lr
+
         self.model.train()
         loss = -self.model.log_prob(x_f, x_q)
         self.optimizer.zero_grad()

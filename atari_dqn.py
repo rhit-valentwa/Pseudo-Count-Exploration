@@ -69,7 +69,7 @@ class TrainConfig:
     batch_size: int = 64
     learning_rate: float = 1e-4
     gamma: float = 0.99
-    n_step: int = 5
+    n_step: int = 1
     train_start: int = 10_000
     train_freq: int = 4
     target_update_freq: int = 1_000
@@ -534,6 +534,8 @@ def train(config: TrainConfig) -> None:
         frac = min(1.0, step / config.epsilon_decay_steps)
         epsilon = config.epsilon_start + frac * (config.epsilon_end - config.epsilon_start)
 
+        fill_stack(stack_u8)
+
         if random.random() < epsilon:
             action = int(env.action_space.sample())
         else:
@@ -708,7 +710,7 @@ def plot_training_curves(
         return np.convolve(padded, filt, mode="valid")
 
     safe_env = env_id.replace("/", "_").replace("-", "_")
-    path = os.path.join(graphs_dir, f"{safe_env}_{len(returns)}ep.png")
+    path = os.path.join(graphs_dir, f"{safe_env}_{len(returns)}ep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
     fig.suptitle(f"Double DQN + Pseudo-count Bonus - {env_id}", fontsize=13)
