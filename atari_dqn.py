@@ -351,8 +351,8 @@ def make_state_bonus_fn(density: str, beta: float, n_frames: int, h: int, w: int
         return make_cts_bonus((h, w), beta=beta)
 
     if density == "vae":
-        from modules.vae import make_vae_bonus
-        return make_vae_bonus((n_frames, h, w), beta=beta)
+        from modules.vae import make_vae_pg_bonus
+        return make_vae_pg_bonus((n_frames, h, w), beta=beta)
 
     if density == "pixelcnn":
         from modules.pixel_cnn import make_pixelcnn_bonus

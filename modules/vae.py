@@ -241,3 +241,98 @@ def make_vae_bonus(
         device=device,
     )
     return VAEBonus(config)
+
+
+class VAEPredictionGainBonus:
+    """
+    Prediction-gain wrapper for the online VAE.
+
+    Computes log-prob proxy = -loss, performs one training step, and
+    returns bonus = beta * sqrt(max(lp_after - lp_before, 0)).
+    """
+
+    def __init__(self, vae: VAEBonus, beta: float = 0.05):
+        self.vae = vae
+        self.beta = float(beta)
+
+    def bonus_and_update(self, obs: np.ndarray | torch.Tensor):
+        # Compute loss before update
+        x = self.vae._to_batch(obs)
+
+        self.vae.model.eval()
+        with torch.no_grad():
+            recon, mu, logvar = self.vae.model(x)
+            recon_error_per = F.mse_loss(recon, x, reduction="none").flatten(1).mean(dim=1)
+            recon_error = recon_error_per.mean()
+            clipped_logvar = torch.clamp(logvar, -10.0, 10.0)
+            kl_per = -0.5 * torch.sum(
+                1.0 + clipped_logvar - mu.pow(2) - torch.exp(clipped_logvar),
+                dim=1,
+            )
+            kl = kl_per.mean() / float(np.prod(self.vae.config.input_shape))
+            loss_before = float((recon_error + self.vae.config.kl_weight * kl).detach().item())
+
+        # One training step (in-place)
+        self.vae.model.train()
+        recon, mu, logvar = self.vae.model(x)
+        recon_error_per = F.mse_loss(recon, x, reduction="none").flatten(1).mean(dim=1)
+        recon_error = recon_error_per.mean()
+        clipped_logvar = torch.clamp(logvar, -10.0, 10.0)
+        kl_per = -0.5 * torch.sum(
+            1.0 + clipped_logvar - mu.pow(2) - torch.exp(clipped_logvar),
+            dim=1,
+        )
+        kl = kl_per.mean() / float(np.prod(self.vae.config.input_shape))
+
+        loss = recon_error + self.vae.config.kl_weight * kl
+        self.vae.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if self.vae.config.grad_clip and self.vae.config.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.vae.model.parameters(), self.vae.config.grad_clip)
+        self.vae.optimizer.step()
+
+        # Measure after-step loss
+        self.vae.model.eval()
+        with torch.no_grad():
+            recon2, mu2, logvar2 = self.vae.model(x)
+            recon_error_per2 = F.mse_loss(recon2, x, reduction="none").flatten(1).mean(dim=1)
+            recon_error2 = recon_error_per2.mean()
+            clipped_logvar2 = torch.clamp(logvar2, -10.0, 10.0)
+            kl_per2 = -0.5 * torch.sum(
+                1.0 + clipped_logvar2 - mu2.pow(2) - torch.exp(clipped_logvar2),
+                dim=1,
+            )
+            kl2 = kl_per2.mean() / float(np.prod(self.vae.config.input_shape))
+            loss_after = float((recon_error2 + self.vae.config.kl_weight * kl2).detach().item())
+
+        # Prediction gain in log-prob proxy (-loss)
+        pg = max(0.0, -loss_after - (-loss_before))
+        bonus = float(self.beta * (pg ** 0.5))
+
+        info = {
+            "vae_loss": loss_after,
+            "vae_recon_error": float(recon_error2.detach().item()),
+            "vae_kl": float(kl2.detach().item()),
+            "prediction_gain": pg,
+        }
+        return bonus, info
+
+
+def make_vae_pg_bonus(
+    input_shape: Tuple[int, int, int],
+    beta: float = 0.05,
+    latent_dim: int = 128,
+    lr: float = 1e-4,
+    kl_weight: float = 1e-3,
+    device: str | None = None,
+) -> VAEPredictionGainBonus:
+    cfg = VAEBonusConfig(
+        input_shape=tuple(int(v) for v in input_shape),
+        beta=float(beta),
+        latent_dim=int(latent_dim),
+        lr=float(lr),
+        kl_weight=float(kl_weight),
+        device=device,
+    )
+    vae = VAEBonus(cfg)
+    return VAEPredictionGainBonus(vae, beta=beta)
