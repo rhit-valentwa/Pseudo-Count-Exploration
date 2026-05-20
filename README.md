@@ -1,6 +1,6 @@
 # Pseudo-Count Exploration
 
-Pseudo-count intrinsic exploration bonuses for tabular Q-learning, based on [Bellemare et al. 2016](https://arxiv.org/abs/1606.01898).
+Pseudo-count intrinsic exploration bonuses for tabular Q-learning, based on [Bellemare et al. 2016](https://arxiv.org/abs/1606.01868).
 
 ## Setup
 
