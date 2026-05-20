@@ -143,6 +143,25 @@ python atari_dqn.py \
   --log-freq 1000 \
   --checkpoint-freq 50000 \
   --log-dir logs \
-  --run-name freeway_vae_seed5671 \
+  --run-name freeway_vae_nstep1_seed1734 \
+  --steps 500000 \
+  --seed 1734
+
+# VAE+n-step=5 run
+python atari_dqn.py \
+  --env ALE/Freeway-v5 \
+  --density vae \
+  --beta 0.05 \
+  --n-step 5 \
+  --train-start 1000 \
+  --epsilon-decay-steps 100000 \
+  --epsilon-end 0.01 \
+  --target-update-freq 5000 \
+  --sticky-action-prob 0.25 \
+  --no-compile \
+  --log-freq 1000 \
+  --checkpoint-freq 50000 \
+  --log-dir logs \
+  --run-name freeway_vae_nstep5_seed5671 \
   --steps 500000 \
   --seed 5671
